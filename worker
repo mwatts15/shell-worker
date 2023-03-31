@@ -1,0 +1,24 @@
+#!/bin/bash
+
+set -eu
+
+echo "${WORKER_ID}: Starting ..." >&2
+
+do_task () {
+    fake_wait_time="$((RANDOM % 5))"
+    echo "Doing $@" >&2
+    echo "Done doing $@" >&2
+}
+
+# This read timeout is a bit of a hack. We actually want to do a non-blocking
+# read
+while true ; do
+    echo "${WORKER_ID}: Setting work request ${WORK_REQUEST}..." >&2
+    mv "${WORK_REQUEST}_" "$WORK_REQUEST"
+    while read task_val1 task_val2 ; do
+        if [ "$task_val1" = "${STOP_TOKEN}" ] ; then
+            exit 0
+        fi
+        do_task $task_val1 $task_val2
+    done <"$QUEUE"
+done

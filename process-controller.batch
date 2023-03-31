@@ -1,0 +1,84 @@
+#!/bin/bash
+set -eu
+NPROC="$(command -v nproc >/dev/null && nproc || echo 0)"
+NUM_WORKERS="${1:-${NPROC}}"
+batch_size=5
+
+if [ "$NUM_WORKERS" -eq 0 ] ; then
+    echo "Unable to determine a good number of worker threads to create" >&2
+    echo "Exiting!" >&2
+    exit 1
+fi
+
+if [ "$NUM_WORKERS" -eq 1 ] ; then
+    echo "Notice: Only creating one worker thread. Typically, this is only appropriate for testing" >&2
+fi
+
+BASE="$(dirname "$(readlink -f "$0")")"
+WD="$(readlink -f "${2:-$PWD}")"
+mkdir -p "$WD"
+
+export STOP_TOKEN="$(tr -d -c 'a-zA-Z0-9' < /dev/urandom | head -c 10)"
+
+echo "Creating ${NUM_WORKERS} workers..." >&2
+for WORKER_ID in `seq $NUM_WORKERS` ; do
+    export WORKER_ID
+    export QUEUE="$WD/$WORKER_ID-queue"
+    export WORK_REQUEST="$WD/$WORKER_ID-work-request"
+    touch "${WORK_REQUEST}_"
+    mkfifo "$QUEUE"
+    echo "Creating ${WORKER_ID}..." >&2
+    ( cd $WD ; exec $BASE/worker </dev/null \
+        2>worker-${WORKER_ID}.err \
+        >worker-${WORKER_ID}.out ) &
+    echo "Created ${WORKER_ID}" >&2
+done
+
+while true ; do
+    declare -A batch
+    for x in `seq $batch_size` ; do
+        read word
+        batch[$x]="$word"
+    done
+    served=
+    while true ; do
+        for wid in `seq $NUM_WORKERS | shuf` ; do
+            work_req="$WD/$wid-work-request"
+            if [ -f "$work_req" ] ; then
+                # We have to remove the request before we serve the word so if
+                # the worker becomes available quickly and issues another
+                # request, we don't accidentally delete it and leave the worker
+                # waiting indefinitely
+                mv "$work_req" "${work_req}_"
+                for word in "${batch[@]}" ; do
+                    echo "$word" >> "$WD/$wid-queue"
+                done
+                served=1
+                break
+            fi
+        done
+        if [ $served ] ; then
+            break
+        else
+            sleep .05
+        fi
+    done
+done </etc/dictionaries-common/words
+echo "Finished with all the words!" >&2
+
+for wid in `seq $NUM_WORKERS` ; do
+    work_req="$WD/$wid-work-request"
+    echo "Waiting for $wid to finish..." >&2
+    while [ ! -f "$work_req" ] ; do
+        sleep .1
+    done
+    echo "$wid finished. Issuing stop request to $wid..." >&2
+    echo "$STOP_TOKEN" >> "$WD/$wid-queue"
+    rm "$work_req"
+done
+wait
+echo "Cleaned up workers. Removing queues..." >&2
+
+for wid in `seq $NUM_WORKERS` ; do
+    rm "$WD/$wid-queue"
+done
